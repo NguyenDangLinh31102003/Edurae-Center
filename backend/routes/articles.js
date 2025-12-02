@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const Article = require("../models/Article");
 const { uploadPDF, uploadImages } = require("../middleware/upload");
+const cloudinary = require("../config/cloudinary");
 
 // GET tất cả bài báo (có phân trang và lọc)
 router.get("/", async (req, res) => {
@@ -78,11 +79,28 @@ router.post("/", uploadPDF.single("pdf"), async (req, res) => {
             articleData.references = JSON.parse(req.body.references);
         }
 
-        // Thêm thông tin PDF nếu có
+        // Upload PDF lên Cloudinary nếu có
         if (req.file) {
+            // Upload to Cloudinary
+            const uploadPromise = new Promise((resolve, reject) => {
+                const uploadStream = cloudinary.uploader.upload_stream(
+                    {
+                        resource_type: "raw",
+                        folder: "edurae-pdfs",
+                        public_id: `pdf-${Date.now()}`
+                    },
+                    (error, result) => {
+                        if (error) reject(error);
+                        else resolve(result);
+                    }
+                );
+                uploadStream.end(req.file.buffer);
+            });
+
+            const result = await uploadPromise;
             articleData.pdfFile = {
-                filename: req.file.filename,
-                path: req.file.path.replace(/\\/g, '/').split('backend/')[1],
+                filename: req.file.originalname,
+                path: result.secure_url,
                 size: req.file.size
             };
         }
@@ -104,12 +122,28 @@ router.post("/:id/images", uploadImages.array("images", 10), async (req, res) =>
             return res.status(404).json({ message: "Không tìm thấy bài báo" });
         }
 
-        const images = req.files.map((file, index) => ({
-            filename: file.filename,
-            path: file.path.replace(/\\/g, '/').split('backend/')[1],
-            caption: req.body[`caption_${index}`] || ""
-        }));
+        // Upload images lên Cloudinary
+        const uploadPromises = req.files.map((file, index) => {
+            return new Promise((resolve, reject) => {
+                const uploadStream = cloudinary.uploader.upload_stream(
+                    {
+                        folder: "edurae-images",
+                        public_id: `img-${Date.now()}-${index}`
+                    },
+                    (error, result) => {
+                        if (error) reject(error);
+                        else resolve({
+                            filename: file.originalname,
+                            path: result.secure_url,
+                            caption: req.body[`caption_${index}`] || ""
+                        });
+                    }
+                );
+                uploadStream.end(file.buffer);
+            });
+        });
 
+        const images = await Promise.all(uploadPromises);
         article.images.push(...images);
         await article.save();
 
