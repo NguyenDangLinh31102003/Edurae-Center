@@ -11,7 +11,12 @@ app.use(express.urlencoded({ extended: true }));
 
 // Kết nối MongoDB
 mongoose.connect(process.env.MONGODB_URI)
-    .then(() => console.log("MongoDB Connected"))
+    .then(() => {
+        console.log("MongoDB Connected");
+        // Initialize GridFS
+        const { initGridFS } = require("./config/gridfs");
+        initGridFS();
+    })
     .catch(err => console.error(err));
 
 // Import routes
@@ -26,6 +31,5 @@ app.get("/", (req, res) => {
 });
 
 // Chạy server
-const cd frontend
-npm start = process.env.PORT || 5000;
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server chạy tại port ${PORT}`));

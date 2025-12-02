@@ -2,7 +2,8 @@ const express = require("express");
 const router = express.Router();
 const Article = require("../models/Article");
 const { uploadPDF, uploadImages } = require("../middleware/upload");
-const cloudinary = require("../config/cloudinary");
+const { getGridFSBucket } = require("../config/gridfs");
+const { Readable } = require('stream');
 
 // GET tất cả bài báo (có phân trang và lọc)
 router.get("/", async (req, res) => {
@@ -79,33 +80,45 @@ router.post("/", uploadPDF.single("pdf"), async (req, res) => {
             articleData.references = JSON.parse(req.body.references);
         }
 
-        // Upload PDF lên Cloudinary nếu có
+        // Upload PDF to GridFS nếu có
         if (req.file) {
-            // Upload to Cloudinary
-            const uploadPromise = new Promise((resolve, reject) => {
-                const uploadStream = cloudinary.uploader.upload_stream(
-                    {
-                        resource_type: "raw",
-                        folder: "edurae-pdfs",
-                        public_id: `pdf-${Date.now()}`
-                    },
-                    (error, result) => {
-                        if (error) reject(error);
-                        else resolve(result);
+            try {
+                const bucket = getGridFSBucket();
+                const filename = `pdf-${Date.now()}-${req.file.originalname}`;
+
+                // Create readable stream from buffer
+                const readableStream = Readable.from(req.file.buffer);
+
+                // Upload to GridFS
+                const uploadStream = bucket.openUploadStream(filename, {
+                    contentType: 'application/pdf',
+                    metadata: {
+                        originalName: req.file.originalname,
+                        uploadDate: new Date()
                     }
-                );
-                uploadStream.end(req.file.buffer);
-            });
+                });
 
-            const result = await uploadPromise;
-            articleData.pdfFile = {
-                filename: req.file.originalname,
-                path: result.secure_url,
-                size: req.file.size
-            };
-        }
+                await new Promise((resolve, reject) => {
+                    readableStream.pipe(uploadStream)
+                        .on('error', reject)
+                        .on('finish', resolve);
+                });
 
-        const article = new Article(articleData);
+                articleData.pdfFile = {
+                    filename: req.file.originalname,
+                    path: uploadStream.id.toString(), // Store GridFS file ID
+                    size: req.file.size
+                };
+
+                console.log("PDF uploaded to GridFS:", uploadStream.id);
+            } catch (uploadError) {
+                console.error("Failed to upload PDF to GridFS:", uploadError);
+                return res.status(500).json({
+                    message: "Failed to upload PDF",
+                    error: uploadError.message
+                });
+            }
+        } const article = new Article(articleData);
         const savedArticle = await article.save();
 
         res.status(201).json(savedArticle);
@@ -122,24 +135,30 @@ router.post("/:id/images", uploadImages.array("images", 10), async (req, res) =>
             return res.status(404).json({ message: "Không tìm thấy bài báo" });
         }
 
-        // Upload images lên Cloudinary
+        // Upload images to GridFS
+        const bucket = getGridFSBucket();
         const uploadPromises = req.files.map((file, index) => {
             return new Promise((resolve, reject) => {
-                const uploadStream = cloudinary.uploader.upload_stream(
-                    {
-                        folder: "edurae-images",
-                        public_id: `img-${Date.now()}-${index}`
-                    },
-                    (error, result) => {
-                        if (error) reject(error);
-                        else resolve({
+                const filename = `img-${Date.now()}-${index}-${file.originalname}`;
+                const readableStream = Readable.from(file.buffer);
+
+                const uploadStream = bucket.openUploadStream(filename, {
+                    contentType: file.mimetype,
+                    metadata: {
+                        originalName: file.originalname,
+                        uploadDate: new Date()
+                    }
+                });
+
+                readableStream.pipe(uploadStream)
+                    .on('error', reject)
+                    .on('finish', () => {
+                        resolve({
                             filename: file.originalname,
-                            path: result.secure_url,
+                            path: uploadStream.id.toString(),
                             caption: req.body[`caption_${index}`] || ""
                         });
-                    }
-                );
-                uploadStream.end(file.buffer);
+                    });
             });
         });
 
@@ -187,6 +206,39 @@ router.delete("/:id", async (req, res) => {
         await article.deleteOne();
         res.json({ message: "Đã xóa bài báo thành công" });
     } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// GET file từ GridFS (PDF hoặc Image)
+router.get("/file/:fileId", async (req, res) => {
+    try {
+        const bucket = getGridFSBucket();
+        const { ObjectId } = require('mongodb');
+        const fileId = new ObjectId(req.params.fileId);
+
+        // Find file info
+        const files = await bucket.find({ _id: fileId }).toArray();
+        if (!files || files.length === 0) {
+            return res.status(404).json({ message: "File not found" });
+        }
+
+        const file = files[0];
+
+        // Set proper headers
+        res.set('Content-Type', file.contentType || 'application/pdf');
+        res.set('Content-Disposition', `inline; filename="${file.filename}"`);
+
+        // Stream file to response
+        const downloadStream = bucket.openDownloadStream(fileId);
+        downloadStream.pipe(res);
+
+        downloadStream.on('error', (error) => {
+            console.error("Error streaming file:", error);
+            res.status(500).json({ message: "Error streaming file" });
+        });
+    } catch (error) {
+        console.error("Error retrieving file:", error);
         res.status(500).json({ message: error.message });
     }
 });
